@@ -10,6 +10,7 @@ app = Flask(__name__)
 CORS(app)
 
 reinforcement_data = []
+is_training = False
 
 # Load Model
 model = tf.keras.models.load_model("query_classifier_model.keras")
@@ -106,14 +107,12 @@ def reinforce():
 def retrain_model():
     global model, vectorizer, label_encoder
 
+    new_data = pd.DataFrame(reinforcement_data, columns=["Query", "Label"])
+    new_data.to_csv("final_dataset (1).csv", mode="a", header=False, index=False)
+
     df = pd.read_csv("final_dataset (1).csv")
     X = df["Query"].astype(str).tolist()
     y = df["Label"].tolist()
-
-    # Add Reinforcement Data
-    for query, label in reinforcement_data:
-        X.append(query)
-        y.append(label)
 
     # Re-encode Labels
     label_encoder.fit(y)
@@ -133,6 +132,29 @@ def retrain_model():
     model.save("query_classifier_model.keras")
 
     return "Model retrained successfully."
+
+@app.route("/retrain", methods=["POST"])
+def retrain_endpoint():
+    global is_training
+
+    if is_training:
+        return jsonify({"message": "Model retraining is already in progress."}), 409  # Conflict response
+
+    is_training = True  # Set flag to indicate retraining is in progress
+
+    def background_training():
+        global is_training
+        try:
+            retrain_model()
+        finally:
+            is_training = False  # Reset flag after training
+
+    # Start training in a new thread
+    training_thread = threading.Thread(target=background_training)
+    training_thread.start()
+
+    return jsonify({"message": "Model retraining started in the background."}), 202  # Accepted response
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
