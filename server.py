@@ -5,6 +5,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import threading
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -157,4 +158,5 @@ def retrain_endpoint():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 8001))
+    app.run(host="0.0.0.0", port=port, debug=True)
