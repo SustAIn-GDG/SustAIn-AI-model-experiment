@@ -1,3 +1,6 @@
+from gevent import monkey
+monkey.patch_all()
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tensorflow as tf
@@ -119,8 +122,9 @@ def retrain_model():
     label_encoder.fit(y)
     y_encoded = label_encoder.transform(y)
 
-    with open("label_encoder.pkl", "wb") as f:
+    with open("label_encoder_temp.pkl", "wb") as f:
         pickle.dump(label_encoder, f)
+    os.replace("label_encoder_temp.pkl", "label_encoder.pkl")
 
     # Re-Vectorize Data
     vectorizer.adapt(X)
@@ -130,7 +134,8 @@ def retrain_model():
     model.fit(X_vec, y_encoded, epochs=1, batch_size=32)
 
     # Save Updated Model
-    model.save("query_classifier_model.keras")
+    model.save("query_classifier_model_temp.keras")
+    os.replace("query_classifier_model_temp.keras", "query_classifier_model.keras")
 
     return "Model retrained successfully."
 
@@ -157,6 +162,11 @@ def retrain_endpoint():
     return jsonify({"message": "Model retraining started in the background."}), 202  # Accepted response
 
 
+@app.route("/", methods=["GET"])
+def health_check():
+    return "Server is running!", 200
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8001))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port)
