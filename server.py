@@ -3,21 +3,20 @@ monkey.patch_all()
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import numpy as np
 import tensorflow as tf
 import pickle
-import numpy as np
-import pandas as pd
-import threading
 import os
 
 app = Flask(__name__)
 CORS(app)
 
-reinforcement_data = []
-is_training = False
+# Load TFLite Model
+interpreter = tf.lite.Interpreter(model_path="query_classifier_model.tflite")
+interpreter.allocate_tensors()
 
-# Load Model
-model = tf.keras.models.load_model("query_classifier_model.keras")
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
 # Load Vectorizer Config & Vocabulary
 with open("vectorizer_config.pkl", "rb") as f:
@@ -28,11 +27,12 @@ vectorizer = tf.keras.layers.TextVectorization.from_config(config)
 with open("vectorizer_vocab.pkl", "rb") as f:
     vocab = pickle.load(f)
 
-vectorizer.set_vocabulary(vocab)  # Properly restore vocabulary
+vectorizer.set_vocabulary(vocab)  # Restore vocabulary
 
 # Load Label Encoder
 with open("label_encoder.pkl", "rb") as f:
     label_encoder = pickle.load(f)
+
 
 @app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
@@ -41,37 +41,34 @@ def predict():
 
     try:
         data = request.get_json()
-        
-        # Debugging Statement
-        print("Received Data:", data)  # Check structure in logs
 
-        # Check if Data is a Dictionary
-        if not isinstance(data, dict):
-            return jsonify({"error": "Invalid input format. Expected JSON object."}), 400
-
-        if "instances" not in data or not isinstance(data["instances"], list):
+        if not isinstance(data, dict) or "instances" not in data or not isinstance(data["instances"], list):
             return jsonify({"error": "Invalid input format. 'instances' should be a list."}), 400
 
-        # Extract Queries
-        queries = []
-        for instance in data["instances"]:
-            if isinstance(instance, dict) and "Query" in instance:
-                queries.append(instance["Query"])
+        queries = [instance["Query"] for instance in data["instances"] if isinstance(instance, dict) and "Query" in instance]
 
         if not queries:
             return jsonify({"error": "No valid queries found in input."}), 400
 
-        vectorized_queries = vectorizer(tf.constant(queries))
-        predictions = model.predict(vectorized_queries)
+        # Vectorize the queries
+        vectorized_queries = vectorizer(tf.constant(queries)).numpy().astype(np.float32)
+
+        # Run inference on each query
         response_data = []
-        for i, scores in enumerate(predictions):
+        for vec_query in vectorized_queries:
+            vec_query = np.expand_dims(vec_query, axis=0)  # Reshape for model input
+
+            interpreter.set_tensor(input_details[0]['index'], vec_query)
+            interpreter.invoke()
+            output_data = interpreter.get_tensor(output_details[0]['index'])
+
             class_labels = label_encoder.classes_.tolist()
-            scores = scores.tolist()  # Convert NumPy array to list
+            scores = output_data[0].tolist()
 
             if not class_labels or not scores:
-                predicted_class = "text generation"  # Default fallback
+                predicted_class = "text generation"
             else:
-                max_index = scores.index(max(scores))  # Index of max score
+                max_index = scores.index(max(scores))
                 predicted_class = class_labels[max_index] if max_index < len(class_labels) else "text generation"
 
             response_data.append({"classes": class_labels, "scores": scores, "predicted_label": predicted_class})
@@ -80,86 +77,6 @@ def predict():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-@app.route("/reinforce", methods=["POST"])
-def reinforce():
-    global reinforcement_data
-
-    try:
-        data = request.get_json()
-        query = data.get("query")
-        correct_label = data.get("correct_label")
-
-        if not query or not correct_label:
-            return jsonify({"error": "Both 'query' and 'correct_label' are required."}), 400
-
-        # Store new data
-        reinforcement_data.append((query, correct_label))
-
-        # Retrain the model after every 10 corrections
-        if len(reinforcement_data) >= 10:
-            training_thread = threading.Thread(target=retrain_model)
-            training_thread.start()
-            reinforcement_data = []
-            return jsonify({"message": "Feedback stored. Reinforcement training started in the background."})
-
-        return jsonify({"message": "Feedback stored. Model will be updated soon."})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
-def retrain_model():
-    global model, vectorizer, label_encoder
-
-    new_data = pd.DataFrame(reinforcement_data, columns=["Query", "Label"])
-    new_data.to_csv("final_dataset (1).csv", mode="a", header=False, index=False)
-
-    df = pd.read_csv("final_dataset (1).csv")
-    X = df["Query"].astype(str).tolist()
-    y = df["Label"].tolist()
-
-    # Re-encode Labels
-    label_encoder.fit(y)
-    y_encoded = label_encoder.transform(y)
-
-    with open("label_encoder_temp.pkl", "wb") as f:
-        pickle.dump(label_encoder, f)
-    os.replace("label_encoder_temp.pkl", "label_encoder.pkl")
-
-    # Re-Vectorize Data
-    vectorizer.adapt(X)
-    X_vec = vectorizer(np.array(X))
-
-    # Re-train Model (Fine-tune last layers)
-    model.fit(X_vec, y_encoded, epochs=1, batch_size=32)
-
-    # Save Updated Model
-    model.save("query_classifier_model_temp.keras")
-    os.replace("query_classifier_model_temp.keras", "query_classifier_model.keras")
-
-    return "Model retrained successfully."
-
-@app.route("/retrain", methods=["POST"])
-def retrain_endpoint():
-    global is_training
-
-    if is_training:
-        return jsonify({"message": "Model retraining is already in progress."}), 409  # Conflict response
-
-    is_training = True  # Set flag to indicate retraining is in progress
-
-    def background_training():
-        global is_training
-        try:
-            retrain_model()
-        finally:
-            is_training = False  # Reset flag after training
-
-    # Start training in a new thread
-    training_thread = threading.Thread(target=background_training)
-    training_thread.start()
-
-    return jsonify({"message": "Model retraining started in the background."}), 202  # Accepted response
 
 
 @app.route("/", methods=["GET"])
